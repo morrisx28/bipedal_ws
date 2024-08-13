@@ -13,7 +13,10 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 import traceback
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped
+from std_msgs.msg import String
+import sys 
+from std_msgs.msg import Float32, Float32MultiArray
 
 
 # balance_kp = 103*0.6
@@ -26,9 +29,12 @@ balance_kp = 0  # *0.75
 balance_kd = 0  # 0.5
 COM_bias = 0
 
+LinearControlCoeff = 6
+
 velocity_kp = 0
 velocity_ki = 0
 velocity_setpoint = 0
+
 
 class PID:
     def __init__(self, Kp, Ki, Kd):
@@ -37,6 +43,8 @@ class PID:
         self.Kd = Kd
         self.integral = 0
         self.previous_error = 0
+        self.max = sys.maxsize
+        self.min = -sys.maxsize-1
 
     def update(self, target, now, dt):
 
@@ -47,12 +55,15 @@ class PID:
         output = self.Kp * error + self.Ki * self.integral + self.Kd * derivative
 
         self.previous_error = error
+        if output < self.min:
+            output = self.min
+        elif output > self.max:
+            output = self.max
         return output
     
-    # def output_limits(self,min,max):
-
-    #     self.max = max
-    #     self.min = min
+    def output_limits(self,min,max):
+         self.max = max
+         self.min = min
 
 
 
@@ -71,7 +82,11 @@ class RosTopicSubscriber(Node):
             Twist, '/cmd_vel', self.twist_callback, 1)
         self.linear_vel = 0.0
         self.angular_vel = 0.0
-
+        self.subscription = self.create_subscription(
+            String, 'body_pose', self.pose_callback, 1)
+        self.bodypose = " "
+    def getBodyPose(self):
+        return self.bodypose
     def listener_callback(self, msg):
 
         qua_x = msg.orientation.x
@@ -89,9 +104,13 @@ class RosTopicSubscriber(Node):
     def getImuOrientation(self) -> float:
         return -self.pitch_init, self.yaw_init
     
+    def getPitch(self):
+        return -self.pitch_init
     def twist_callback(self, msg):
-        self.linear_vel = msg.linear.x * 200
-        self.angular_vel = msg.angular.z
+        self.linear_vel = msg.linear.x * LinearControlCoeff
+        self.angular_vel = msg.angular.z*0.6
+    def pose_callback(self, msg):
+        self.bodypose = msg.data
 
 
 class robotcontrol:
@@ -111,8 +130,8 @@ class robotcontrol:
         self.motor12 = motor12
         self.wheel1 = wheel1
         self.wheel2 = wheel2
-        self.wheel_pos_x = -0.02845
-        self.wheel_pos_y = -0.06632
+        self.wheel_pos_x = -0.025
+        self.wheel_pos_y = -0.06
         self.createdxlmotor()
 
         self.balance_pid = PID(10, 0, 1)
@@ -121,6 +140,7 @@ class robotcontrol:
         # self.velocity_pid.output_limits = (0, 0)
         self.angularvelocity_pid = PID(65, 0, 0)
         # self.angularvelocity_pid.output_limits = (-300, 300)
+        self.center_pid = PID(10e-6, 0, 10e-8)
 
         self.yaw_pid = PID(350, 0, 0.4)
 
@@ -170,32 +190,30 @@ class robotcontrol:
         self.mc.startmotor(0x02)
 
     def lockleg(self):
-
-        theta1, theta2 = self.inverse_kinematics(self.wheel_pos_x, self.wheel_pos_y)
-        theta1_dxl = int(1682 - theta1*4096/(2*np.pi))
-        theta2_dxl = int(1760 + (theta2 - math.radians(64)) * 1000 / math.radians(81))
-        print('theta_dxl:', theta1_dxl, theta2_dxl)
-
-
+        theta1_dxl = 1200#int(1682 - theta1*4096/(2*np.pi))+1024
+        theta2_dxl = int(3500)
+        
+        
         self.enableAllMotor()
         self.dxl.updateMotorData()
         self.motor01.writePosition(theta2_dxl)  # 2760-1795
         self.motor02.writePosition(theta1_dxl)  # 3800-2900
         self.motor11.writePosition(theta2_dxl)
-        self.motor12.writePosition(2900)
+        self.motor12.writePosition(600)
         self.dxl.sentAllCmd()
 
         _ = self.mc.torquecontrol(0x01, 300)
-        # _ = self.mc.torquecontrol(0x02, -300)
-        time.sleep(0.1)
+        # # _ = self.mc.torquecontrol(0x02, -300)
+        time.sleep(0.15)
         
 
         self.motor01.writePosition(theta2_dxl)  # 2760-1795
         self.motor02.writePosition(theta1_dxl)  # 3800-2900
         self.motor11.writePosition(theta2_dxl)
         self.motor12.writePosition(theta1_dxl)
-        self.dxl.sentAllCmd()        
-
+        self.dxl.sentAllCmd()            
+    def frontStandUp(self):
+        pass  
     def motortorquecommand(self, id, torque):
         a = self.mc.torquecontrol(id, torque)
 
@@ -227,7 +245,8 @@ class robotcontrol:
         yaw_dot = (yaw - self.prev_yaw) / self.dt
         self.prev_yaw = yaw
         return yaw_dot
-               
+    def getRelWheelPos(self):
+        return self.wheel_pos_x-0.025              
     def inverse_kinematics(self, x, y, L1=0.12, L2=0.12):
         # 計算 d    
         d = np.sqrt(x**2 + y**2)
@@ -243,15 +262,16 @@ class robotcontrol:
     def changeHeight(self, dx=0.0, dy=0.0):
 
         theta1, theta2 = self.inverse_kinematics(self.wheel_pos_x+dx, self.wheel_pos_y+dy)
-        theta1_dxl = int(1682 - theta1*4096/(2*np.pi))
-        theta2_dxl = int(1760 + (theta2 - math.radians(64)) * 1000 / math.radians(81))
-        print('theta_dxl:', theta1_dxl, theta2_dxl)
-        
-        if theta1_dxl>3800 or theta1_dxl<2900:
-            print('theta_dxl over constrain')
-        elif theta2_dxl>2760 or theta2_dxl<1795:
-            print('theta_dxl over constrain')
+        theta1_dxl = int(-900 - theta1*4096/(2*np.pi))
+        theta2_dxl = int(0 + 2*theta2*4096/(2*np.pi))
+
+
+        if theta1_dxl>2000 or theta1_dxl<-500:
+            print('theta1_dxl  over constrain')
+        elif theta2_dxl>3800 or theta2_dxl<975:
+            print('theta2_dxl over constrain')
         else:
+            
             self.motor01.writePosition(theta2_dxl) # 2760-1795
             self.motor02.writePosition(theta1_dxl)  # 3800-2900
             self.motor11.writePosition(theta2_dxl)
@@ -261,28 +281,60 @@ class robotcontrol:
             self.wheel_pos_y += dy
 
     def controller(self):
-        
         dt = 1 / 200
         motorrpm = 0
         desire_pitch = 0
         position = 0.0
-        middle_ang = -0.05     #-0.028
+        middle_ang = -0.04
         motor_speed = 0.0
         count = 0
         count_drop = 0
         yaw_vel_odom = 0.0
-        
+        HeightCount = 0
         while True:
             start = time.time()
             if not self.isRunning:
                 break
+#D mode     
+            if self.subscriber.getBodyPose() == "a":
+                if self.subscriber.getPitch() <0:
+                    self.lockleg()#stand up when fall on back
+                else:#fall on face stand up
+                    self.frontStandUp()
+            elif  self.subscriber.getBodyPose() == "y":
+                self.changeHeight(dy=-0.08)
+                time.sleep(1.5)
+                self.changeHeight(dy=0.08)
+            elif  self.subscriber.getBodyPose() == "b":
+                pass
+            elif  self.subscriber.getBodyPose() == "up":
+                self.changeHeight(dy=-0.001)
+                print("UPPPPPPPPPPPPPPPPPPP")
+                HeightCount = HeightCount + 1#to be changed according to changeheight
+            elif  self.subscriber.getBodyPose() == "down":
+                self.changeHeight(dy=0.001)
+                HeightCount = HeightCount - 1
+            elif  self.subscriber.getBodyPose() == "left":
+                self.changeHeight(dx=0.001)
+            elif  self.subscriber.getBodyPose() == "right":
+                self.changeHeight(dx=-0.001)
+            if self.subscriber.getBodyPose() == "stop":
+                self.disableALLmotor()
+                self.closeSystem()
+
+
+
+            self.setAngularPI(-((self.wheel_pos_y+0.06)/0.0005)*0.35+65,0)#(-(self.wheel_pos_y+0.06/0.0005*0.25))+65)
+            #print(-((self.wheel_pos_y+0.06)/0.0005)*0.35+65)
+            # #-(OldWheelX-self.wheel_pos_y)/0.0005*0.25,0)
+            LinearControlCoeff=6+((self.wheel_pos_y-0.06)*10)
+            #print(LinearControlCoeff)
             pitch, yaw = self.subscriber.getImuOrientation()
             # print(f'pitch : {pitch}')
             pitch_velocity = self.getPitchDot(pitch)
             yaw_velocity = self.getYawDot(yaw)
-            
             # print(f'pitch vel: {pitch_velocity}')
-
+            
             ## Adapt COG offset angle ##
             # angle_bias = desire_pitch - pitch
             output2 = self.balance_pid.update(desire_pitch, pitch,dt)
@@ -291,21 +343,24 @@ class robotcontrol:
             # print(f'dersire ang {desire_pitch}')
             output3 = self.angularvelocity_pid.update(output2, pitch_velocity,dt)
             output3 = int(output3)
+            
             # print(f'output {output3}')
             if abs(pitch) > math.radians(40):
                 output3 = 0
-            
             output4 = self.yaw_pid.update(self.subscriber.angular_vel, yaw_vel_odom, dt)
             # print(yaw_velocity, output4)
 
             output4_a = int(output3-output4)
             output4_b = int(output3+output4)
+            
             a = self.mc.torquecontrol(0x01, output4_a)
             b = self.mc.torquecontrol(0x02, -output4_b)
             count += 1
+            
             if a is None or b is None:
                 count_drop += 1
             else:
+                
                 # motorrpm = abs(a[2]) + abs(b[2])
                 # motorrpm = -a[2]
                 # print('a+b', a[2]+b[2])
@@ -314,8 +369,18 @@ class robotcontrol:
                 motor_speed = -(a[2]+(-b[2])) / 2 * 2 * np.pi / 60   # rad/s
                 # d_pos = motor_speed * 0.06152/2 * dt
                 # position += d_pos
+                if self.subscriber.getBodyPose() == "x":
+                    #print('motor_speed:', motor_speed)
+                    centerOutput = self.center_pid.update(0.0,motor_speed, dt)#motorSpeed = 0
+                    #print('centerOutput:', centerOutput)
+                    self.changeHeight(dx=-centerOutput)
+                    
             # print('speed:', motor_speed)
+            
+            
             desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, motor_speed, dt)
+            
+            
             # print('desire_pitch:', desire_pitch)
             # print('drop_rate:', count_drop/count*100)
             # print('frequency:', 1/dt)
@@ -324,6 +389,7 @@ class robotcontrol:
             end = time.time()
             dt = start - end
             # print('dt', dt)
+            
         # finally:
         #     self.disableALLmotor()
 
@@ -363,7 +429,9 @@ def main():
                 robot_motor.disableALLmotor()
                 robot_motor.closeSystem()
                 break
-
+        except KeyboardInterrupt:
+            robot_motor.disableALLmotor()
+            robot_motor.closeSystem()
         except Exception as e:
             traceback.print_exc()
             break
