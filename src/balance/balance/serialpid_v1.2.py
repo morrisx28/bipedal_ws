@@ -1,5 +1,11 @@
-from module.foc_motor_serial import MotorControl
-from module.DXL_motor_control import DXL_Conmunication
+import sys
+import os
+
+# Manually add the full path to 'balance/module' to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'balance', 'module'))
+
+from balance.module.foc_motor_serial import MotorControl
+from balance.module.DXL_motor_control import DXL_Conmunication
 import rclpy
 import math
 import time
@@ -14,21 +20,12 @@ from std_msgs.msg import Float32
 import traceback
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+import matplotlib.pyplot as plt
+from tutorial_interfaces.srv import SetMode
 
 
-# balance_kp = 103*0.6
-# balance_ki = 2*balance_kp/0.5
-# balance_kd = 0.125*103*0.5
-angularv_kp = 30
-angularv_ki = 10
-
-balance_kp = 0  # *0.75
-balance_kd = 0  # 0.5
-COM_bias = 0
-
-velocity_kp = 0
-velocity_ki = 0
-velocity_setpoint = 0
+WHEEL_DIS = 0.03076
 
 class PID:
     def __init__(self, Kp, Ki, Kd):
@@ -62,9 +59,8 @@ class RosTopicSubscriber(Node):
         super().__init__('imusubscriber')
         self.subscription = self.create_subscription(
             Imu, 'imu/data_raw', self.listener_callback, 1)
-        # self.theta_Pub = self.create_publisher(Float32 , 'theta' , 1)
-        # self.X_dot_Pub = self.create_publisher(Float32 , 'X_dot' , 1)
         self.pitch_init = 0
+        self.yaw_init = 0
         self.angularvelocity_y = 0
 
         self.twist_sub = self.create_subscription(
@@ -93,17 +89,48 @@ class RosTopicSubscriber(Node):
         self.linear_vel = msg.linear.x * 200
         self.angular_vel = msg.angular.z
 
+class PoseService(Node):
+    def __init__(self):
+        super().__init__('PoseService')
+        self.srv = self.create_service(SetMode, 'get_pose', self.pose_callback)
+        self.get_logger().info('Pose service ready')
+
+        self.current_mode = ""
+        self.previous_mode = ""
+        
+
+    def pose_callback(self, request, response):
+        # Provide the current pose data upon request
+        if request.mode == "b" or request.mode == "x":
+            self.current_mode = request.mode  # Store the received mode
+            response.success = True
+            response.message = f"Mode set to: {self.current_mode}"
+        else:
+            self.current_mode = ""
+        return response
+
 
 class robotcontrol:
 
-    def __init__(self, motor01, motor02, motor11, motor12, wheel1, wheel2):
-        rclpy.init()
-        self.dxl = DXL_Conmunication(device_name="/dev/dxl", b_rate=57600)
-        self.mc = MotorControl(device_name="/dev/foc", baudrate=2e6)
+    def __init__(self, motor01, motor02, motor11, motor12, wheel1, wheel2, service):
+
+        # self.dxl = DXL_Conmunication(device_name="/dev/dxl", b_rate=57600)
+        # self.mc = MotorControl(device_name="/dev/foc", baudrate=2e6)
+        self.dxl = DXL_Conmunication(device_name="/dev/ttyUSB2", b_rate=57600)
+        self.mc = MotorControl(device_name="/dev/ttyUSB0", baudrate=2e6)
+
+        # Create the subscriber and service
         self.subscriber = RosTopicSubscriber()
-        subscriber_thread = threading.Thread(
-            target=rclpy.spin, args=(self.subscriber,), daemon=True)
-        subscriber_thread.start()
+        self.service = service
+
+        # Use a single thread to spin both the subscriber and the service
+        self.executor = rclpy.executors.SingleThreadedExecutor()
+        self.executor.add_node(self.subscriber)
+        self.executor.add_node(self.service)
+
+        self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
+        self.spin_thread.start()
+
         self.pid_thread = None
         self.motor01 = motor01
         self.motor02 = motor02
@@ -113,20 +140,23 @@ class robotcontrol:
         self.wheel2 = wheel2
         self.createdxlmotor()
         
+        self.balance_pid = PID(16, 0.0, 0.13)             #current best:20,0.0, 0.1
+        self.velocity_pid = PID(0.008,  0.00, 0.00001)   # 0.008 0.00001
+        self.angularvelocity_pid = PID(40, 0, 0.0)       #current best:40, 0, 0.0
 
-        self.balance_pid = PID(10, 0, 1)
-        # self.balance_pid.output_limits = (-10, 10)
-        self.velocity_pid = PID(0.008, 0.0, 0.00001)
-        # self.velocity_pid.output_limits = (0, 0)
-        self.angularvelocity_pid = PID(65, 0, 0)
-        # self.angularvelocity_pid.output_limits = (-300, 300)
-
-        self.yaw_pid = PID(350, 0, 0.4)
+        self.yaw_pid = PID(200, 0, 0.4) # 350, 0, 0.4
 
         self.dt = 1 / 200
         self.prev_pitch = 0
         self.prev_yaw = 0
         self.isRunning = False
+        self.yaw_robot_vel = 0
+        self.linear_robot_vel = 0
+
+        self.time_list = []
+        self.pitch_list = []
+        self.angularvel_list = []
+        self.linear_vel_list = []
 
 
     def getControllerPIDParam(self):
@@ -152,7 +182,7 @@ class robotcontrol:
         self.motor01 = self.dxl.createMotor("motor01", 1)
         self.motor02 = self.dxl.createMotor("motor02", 2)
         self.motor11 = self.dxl.createMotor("motor11", 11)
-        self.motor12 = self.dxl.createMotor("motor12", 12)
+        self.motor12 = self.dxl.createMotor("motor12", 22)
         self.dxl.addAllBuckPrarmeter()
         self.enableAllMotor()
         self.dxl.updateMotorData()
@@ -169,43 +199,83 @@ class robotcontrol:
         self.mc.startmotor(0x02)
 
     def lockleg(self):
+        
+        self.enableAllMotor()
+        self.dxl.updateMotorData()
+        self.motor01.writePosition(2150)  
+        self.motor02.writePosition(2150)  
+        self.motor11.writePosition(2048)
+        self.motor12.writePosition(2048)
+        self.dxl.sentAllCmd()
 
         self.enableAllMotor()
         self.dxl.updateMotorData()
-        self.motor01.writePosition(2760)  # 2760-1795
-        self.motor02.writePosition(3795)  # 3800-2900
-        self.motor11.writePosition(2760)
-        self.motor12.writePosition(2900)
+        self.motor01.writePosition(1650)  # 2760-1795
+        self.motor02.writePosition(2150)  # 3800-2900
+        self.motor11.writePosition(2090)
+        self.motor12.writePosition(2048)
         self.dxl.sentAllCmd()
 
-        _ = self.mc.torquecontrol(0x01, 300)
-        # _ = self.mc.torquecontrol(0x02, -300)
-        time.sleep(0.1)
-
-        self.motor01.writePosition(2760)  # 2760-1795
-        self.motor02.writePosition(3795)  # 4095-2900
-        self.motor11.writePosition(2760)
-        self.motor12.writePosition(3795)
+        self.enableAllMotor()
+        self.dxl.updateMotorData()
+        self.motor01.writePosition(2150)  
+        self.motor02.writePosition(2150)  
+        self.motor11.writePosition(2048)
+        self.motor12.writePosition(2048)
         self.dxl.sentAllCmd()
         
+    def dxlMotorTest(self):
+        self.enableAllMotor()
+        self.dxl.updateMotorData()
+        self.motor01.writePosition(2048)  # 2760-1795
+        self.motor02.writePosition(2048)  # 3800-2900
+        self.motor11.writePosition(2048)
+        self.motor12.writePosition(2048)
+        self.dxl.sentAllCmd()
+
+    def focMotorTest(self):
+        self.motortorquecommand(0x02, 80)
+        self.motortorquecommand(0x01, -80)
 
     def motortorquecommand(self, id, torque):
-        a = self.mc.torquecontrol(id, torque)
-
-        return a
+        result = self.mc.torquecontrol(id, torque)
+        return result
 
     def motorspeedcommand(self, id, speed):
-        a = self.mc.speedcontrol(id, speed)
+        result = self.mc.speedcontrol(id, speed)
 
-        return a
+        return result
 
     def disableALLmotor(self):
         self.isRunning = False
         if self.pid_thread is not None:
             self.pid_thread.join()
-        self.dxl.disableAllMotor()
         self.mc.stopmotor(0x01)
         self.mc.stopmotor(0x02)
+        self.dxl.disableAllMotor()
+        
+        # plt.figure(figsize=(10, 6))
+
+        # plt.subplot(3, 1, 1)
+        # plt.plot(self.time_list, self.pitch_list, label="pitch")
+        # plt.title('PID Controller')
+        # plt.ylabel('pitch')
+        # plt.grid(True)
+
+        # plt.subplot(3, 1, 2)
+        # plt.plot(self.time_list, self.angularvel_list, label="angular vel", color='orange')
+        # plt.ylabel('angular vel')
+        # plt.grid(True)
+
+        # plt.subplot(3, 1, 3)
+        # plt.plot(self.time_list, self.linear_vel_list, label="linear vel", color='green')
+        # plt.ylabel('linear vel')
+        # plt.xlabel('Time')
+        # plt.grid(True)
+
+        # plt.tight_layout()
+        # plt.savefig('pid_controller_output.png')
+        # print("The image has been saved as 'pid_controller_output.png'")
 
     def closeSystem(self):
         self.dxl.closeHandler()
@@ -220,19 +290,67 @@ class robotcontrol:
         yaw_dot = (yaw - self.prev_yaw) / self.dt
         self.prev_yaw = yaw
         return yaw_dot
-               
+    
+    def odomEstimate(self, rw_motor_st, lw_motor_st):
+        if lw_motor_st is not None and rw_motor_st is not None:
+            self.yaw_robot_vel = (rw_motor_st[2] + lw_motor_st[2]) * WHEEL_DIS * self.dt/0.2
+            self.linear_robot_vel = -(rw_motor_st[2]+(-lw_motor_st[2])) / 2 * 2 * np.pi / 60   # rad/s
+
+    def balanceControlLoop(self):
+
+        dt = 1 / 200
+        middle_ang = 0.109    #original=>0.11
+        desire_pitch = 0     #0
+        motor_speed = 0
+        start_time = time.time()
+        
+
+        while True:
+            current_time = time.time()-start_time
+            if not self.isRunning:
+                break
+            pitch, yaw = self.subscriber.getImuOrientation()
+            # print(f'pitch : {pitch}')
+            pitch_velocity = self.getPitchDot(pitch)
+            # print(f'pitch vel: {pitch_velocity}')
+
+            ## Adapt COG offset angle ##
+
+            desire_angular_vel = self.balance_pid.update(desire_pitch, pitch,dt)
+            torque_cmd = self.angularvelocity_pid.update(desire_angular_vel, pitch_velocity,dt)
+            torque_cmd = int(torque_cmd)
+            if abs(pitch) > math.radians(40):
+                torque_cmd = 0
+            self.pitch_list.append(pitch)
+            self.angularvel_list.append(pitch_velocity)
+
+            steering_cmd = self.yaw_pid.update(-self.subscriber.angular_vel, self.yaw_robot_vel, dt)
+            # print(yaw_velocity, steering_cmd)
+
+            torque_cmd_right = int(torque_cmd-steering_cmd)
+            torque_cmd_left = int(torque_cmd+steering_cmd)
+            rw_motor_st = self.mc.torquecontrol(0x01, torque_cmd_left) # right
+            lw_motor_st = self.mc.torquecontrol(0x02, -torque_cmd_right)
+            # rw_motor_st = self.mc.torquecontrol(0x01, torque_cmd) # right
+            # lw_motor_st = self.mc.torquecontrol(0x02, -torque_cmd)
+
+            self.odomEstimate(rw_motor_st, lw_motor_st)
+            desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, self.linear_robot_vel, dt)
+            self.linear_vel_list.append(self.linear_robot_vel)
+
+            desire_pitch += middle_ang
+            end = time.time()
+            dt = start_time - end
+            # print(f"dt : {dt}")
+
+            self.time_list.append(current_time)
 
     def controller(self):
         
         dt = 1 / 200
-        motorrpm = 0
-        desire_pitch = 0
-        position = 0.0
-        middle_ang = -0.05     #-0.028
-        motor_speed = 0.0
-        count = 0
-        count_drop = 0
-        yaw_vel_odom = 0.0
+        desire_pitch = 0     #0.0
+        middle_ang = 0.0     #0.0
+        yaw_vel_odom = 0.06
         
         while True:
             start = time.time()
@@ -241,43 +359,27 @@ class robotcontrol:
             pitch, yaw = self.subscriber.getImuOrientation()
             # print(f'pitch : {pitch}')
             pitch_velocity = self.getPitchDot(pitch)
-            yaw_velocity = self.getYawDot(yaw)
             
             # print(f'pitch vel: {pitch_velocity}')
 
             ## Adapt COG offset angle ##
-            # angle_bias = desire_pitch - pitch
+
             output2 = self.balance_pid.update(desire_pitch, pitch,dt)
-            # output2 = self.balance_pid.update(desire_pitch, pitch,dt)
-            # desire_pitch -= angle_bias * 0.00001
-            # print(f'dersire ang {desire_pitch}')
             output3 = self.angularvelocity_pid.update(output2, pitch_velocity,dt)
             output3 = int(output3)
-            # print(f'output {output3}')
             if abs(pitch) > math.radians(40):
                 output3 = 0
             
-            output4 = self.yaw_pid.update(self.subscriber.angular_vel, yaw_vel_odom, dt)
+            output4 = self.yaw_pid.update(self.subscriber.angular_vel, self.yaw_robot_vel, dt)
             # print(yaw_velocity, output4)
 
             output4_a = int(output3-output4)
             output4_b = int(output3+output4)
-            a = self.mc.torquecontrol(0x01, output4_a)
-            b = self.mc.torquecontrol(0x02, -output4_b)
-            count += 1
-            if a is None or b is None:
-                count_drop += 1
-            else:
-                # motorrpm = abs(a[2]) + abs(b[2])
-                # motorrpm = -a[2]
-                # print('a+b', a[2]+b[2])
-                yaw_vel_odom = (a[2]+b[2])*0.03076*dt/0.2
-                # print('angular_vel', yaw_vel_odom)
-                motor_speed = -(a[2]+(-b[2])) / 2 * 2 * np.pi / 60   # rad/s
-                # d_pos = motor_speed * 0.06152/2 * dt
-                # position += d_pos
+            rw_motor_st = self.mc.torquecontrol(0x01, output4_a) # right
+            lw_motor_st = self.mc.torquecontrol(0x02, -output4_b)
+            self.odomEstimate(rw_motor_st, lw_motor_st)
             # print('speed:', motor_speed)
-            desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, motor_speed, dt)
+            desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, self.linear_robot_vel, dt)
             # print('desire_pitch:', desire_pitch)
             # print('drop_rate:', count_drop/count*100)
             # print('frequency:', 1/dt)
@@ -297,32 +399,55 @@ class robotcontrol:
         # self.startfocmotor()
         self.pid_thread = threading.Thread(target=self.controller)
         self.pid_thread.start()
+    
+    def startBalance(self):
+        self.prev_pitch = 0
+        self.isRunning = True
+        self.lockleg()
+        
+        # self.startfocmotor()
+        self.pid_thread = threading.Thread(target=self.balanceControlLoop)
+        self.pid_thread.start()
+    
+    def clearWheelMotorEr(self):
+        self.mc.cleanerror(0x01)
+        self.mc.cleanerror(0x02)
 
 def main():
+    rclpy.init()
+    service = PoseService()
+
     robot_motor = robotcontrol(
-        'motor01', 'motor02', 'motor11', 'motor12', 'wheel1', 'wheel2')
+        'motor01', 'motor02', 'motor11', 'motor12', 'wheel1', 'wheel2', service)
     command_dict = {
         "d": robot_motor.disableALLmotor,
         "start": robot_motor.startController,
         "get": robot_motor.getControllerPIDParam,
-        "clear": robot_motor.mc.cleanerror,
+        "clear": robot_motor.clearWheelMotorEr,
+        "lock": robot_motor.lockleg,
+        "foct": robot_motor.focMotorTest,
+        "b": robot_motor.startBalance,
     }
-
     while True:
         try:
-            cmd = input("CMD :")
-            if cmd in command_dict:
-                command_dict[cmd]()
-            elif cmd == "exit":
-                robot_motor.disableALLmotor()
-                robot_motor.closeSystem()
-                break
-
+            #cmd = input("CMD :")
+            cmd = ""  
+            time.sleep(0.1)
+            
+            if service.current_mode != service.previous_mode:
+                cmd = service.current_mode
+                #print("cmd",cmd)
+                service.previous_mode = service.current_mode
+                if cmd in command_dict:
+                    command_dict[cmd]()
+                elif cmd == "x":
+                    robot_motor.disableALLmotor()
+                    robot_motor.closeSystem()
+                    break
+            
         except Exception as e:
             traceback.print_exc()
             break
 
-
 if __name__ == '__main__':
-
     main()
