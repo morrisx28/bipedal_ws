@@ -21,7 +21,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'serialpid_v1_2 = balance.serialpid_v1_2:main',
+            'serialpid_v1_2 = balance.pid_control:main',
         ],
     },
 )

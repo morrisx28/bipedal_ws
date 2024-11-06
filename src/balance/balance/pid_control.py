@@ -45,11 +45,6 @@ class PID:
 
         self.previous_error = error
         return output
-    
-    # def output_limits(self,min,max):
-
-    #     self.max = max
-    #     self.min = min
 
 
 
@@ -253,29 +248,31 @@ class robotcontrol:
         self.mc.stopmotor(0x01)
         self.mc.stopmotor(0x02)
         self.dxl.disableAllMotor()
+
+    def plotResult(self):
         
-        # plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(10, 6))
 
-        # plt.subplot(3, 1, 1)
-        # plt.plot(self.time_list, self.pitch_list, label="pitch")
-        # plt.title('PID Controller')
-        # plt.ylabel('pitch')
-        # plt.grid(True)
+        plt.subplot(3, 1, 1)
+        plt.plot(self.time_list, self.pitch_list, label="pitch")
+        plt.title('PID Controller')
+        plt.ylabel('pitch')
+        plt.grid(True)
 
-        # plt.subplot(3, 1, 2)
-        # plt.plot(self.time_list, self.angularvel_list, label="angular vel", color='orange')
-        # plt.ylabel('angular vel')
-        # plt.grid(True)
+        plt.subplot(3, 1, 2)
+        plt.plot(self.time_list, self.angularvel_list, label="angular vel", color='orange')
+        plt.ylabel('angular vel')
+        plt.grid(True)
 
-        # plt.subplot(3, 1, 3)
-        # plt.plot(self.time_list, self.linear_vel_list, label="linear vel", color='green')
-        # plt.ylabel('linear vel')
-        # plt.xlabel('Time')
-        # plt.grid(True)
+        plt.subplot(3, 1, 3)
+        plt.plot(self.time_list, self.linear_vel_list, label="linear vel", color='green')
+        plt.ylabel('linear vel')
+        plt.xlabel('Time')
+        plt.grid(True)
 
-        # plt.tight_layout()
-        # plt.savefig('pid_controller_output.png')
-        # print("The image has been saved as 'pid_controller_output.png'")
+        plt.tight_layout()
+        plt.savefig('pid_controller_output.png')
+        print("The image has been saved as 'pid_controller_output.png'")
 
     def closeSystem(self):
         self.dxl.closeHandler()
@@ -331,8 +328,6 @@ class robotcontrol:
             torque_cmd_left = int(torque_cmd+steering_cmd)
             rw_motor_st = self.mc.torquecontrol(0x01, torque_cmd_left) # right
             lw_motor_st = self.mc.torquecontrol(0x02, -torque_cmd_right)
-            # rw_motor_st = self.mc.torquecontrol(0x01, torque_cmd) # right
-            # lw_motor_st = self.mc.torquecontrol(0x02, -torque_cmd)
 
             self.odomEstimate(rw_motor_st, lw_motor_st)
             desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, self.linear_robot_vel, dt)
@@ -387,9 +382,6 @@ class robotcontrol:
             desire_pitch += middle_ang
             end = time.time()
             dt = start - end
-            # print('dt', dt)
-        # finally:
-        #     self.disableALLmotor()
 
     def startController(self):
         self.prev_pitch = 0
