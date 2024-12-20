@@ -4,8 +4,8 @@ import os
 # Manually add the full path to 'balance/module' to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'balance', 'module'))
 
-from balance.module.foc_motor_serial import MotorControl
-from balance.module.DXL_motor_control import DXL_Conmunication
+from module.foc_motor_serial import MotorControl
+from module.DXL_motor_control import DXL_Conmunication
 import rclpy
 import math
 import time
@@ -20,10 +20,7 @@ from std_msgs.msg import Float32
 import traceback
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
 import matplotlib.pyplot as plt
-from tutorial_interfaces.srv import SetMode
-
 
 WHEEL_DIS = 0.03076
 
@@ -45,6 +42,11 @@ class PID:
 
         self.previous_error = error
         return output
+    
+    # def output_limits(self,min,max):
+
+    #     self.max = max
+    #     self.min = min
 
 
 
@@ -84,48 +86,19 @@ class RosTopicSubscriber(Node):
         self.linear_vel = msg.linear.x * 200
         self.angular_vel = msg.angular.z
 
-class PoseService(Node):
-    def __init__(self):
-        super().__init__('PoseService')
-        self.srv = self.create_service(SetMode, 'get_pose', self.pose_callback)
-        self.get_logger().info('Pose service ready')
-
-        self.current_mode = ""
-        self.previous_mode = ""
-        
-
-    def pose_callback(self, request, response):
-        # Provide the current pose data upon request
-        if request.mode == "b" or request.mode == "x":
-            self.current_mode = request.mode  # Store the received mode
-            response.success = True
-            response.message = f"Mode set to: {self.current_mode}"
-        else:
-            self.current_mode = ""
-        return response
-
 
 class robotcontrol:
 
-    def __init__(self, motor01, motor02, motor11, motor12, wheel1, wheel2, service):
-
+    def __init__(self, motor01, motor02, motor11, motor12, wheel1, wheel2):
+        rclpy.init()
         # self.dxl = DXL_Conmunication(device_name="/dev/dxl", b_rate=57600)
         # self.mc = MotorControl(device_name="/dev/foc", baudrate=2e6)
-        self.dxl = DXL_Conmunication(device_name="/dev/ttyUSB2", b_rate=57600)
-        self.mc = MotorControl(device_name="/dev/ttyUSB0", baudrate=2e6)
-
-        # Create the subscriber and service
+        self.dxl = DXL_Conmunication(device_name="/dev/ttyUSB0", b_rate=57600)
+        self.mc = MotorControl(device_name="/dev/ttyUSB2", baudrate=2e6)
         self.subscriber = RosTopicSubscriber()
-        self.service = service
-
-        # Use a single thread to spin both the subscriber and the service
-        self.executor = rclpy.executors.SingleThreadedExecutor()
-        self.executor.add_node(self.subscriber)
-        self.executor.add_node(self.service)
-
-        self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
-        self.spin_thread.start()
-
+        subscriber_thread = threading.Thread(
+            target=rclpy.spin, args=(self.subscriber,), daemon=True)
+        subscriber_thread.start()
         self.pid_thread = None
         self.motor01 = motor01
         self.motor02 = motor02
@@ -135,11 +108,11 @@ class robotcontrol:
         self.wheel2 = wheel2
         self.createdxlmotor()
         
-        self.balance_pid = PID(16, 0.0, 0.13)             #current best:20,0.0, 0.1
-        self.velocity_pid = PID(0.008,  0.00, 0.00001)   # 0.008 0.00001
-        self.angularvelocity_pid = PID(40, 0, 0.0)       #current best:40, 0, 0.0
+        self.balance_pid = PID(16.0, 0.0, 0.13)             #current best:20,0.0, 0.1  16 0 0.13
+        self.velocity_pid = PID(0.008,  0.0, 0.00001)   # 0.008 0.00001            
+        self.angularvelocity_pid = PID(40, 0, 0)       #current best:40, 0, 0.0
 
-        self.yaw_pid = PID(200, 0, 0.4) # 350, 0, 0.4
+        self.yaw_pid = PID(350, 0, 0.4)
 
         self.dt = 1 / 200
         self.prev_pitch = 0
@@ -195,21 +168,22 @@ class robotcontrol:
 
     def lockleg(self):
         
-        self.enableAllMotor()
-        self.dxl.updateMotorData()
-        self.motor01.writePosition(2150)  
-        self.motor02.writePosition(2150)  
-        self.motor11.writePosition(2048)
-        self.motor12.writePosition(2048)
-        self.dxl.sentAllCmd()
+        # self.enableAllMotor()
+        # self.dxl.updateMotorData()
+        # self.motor01.writePosition(2150)  
+        # self.motor02.writePosition(2150)  
+        # self.motor11.writePosition(2048)
+        # self.motor12.writePosition(2048)
+        # self.dxl.sentAllCmd()
 
-        self.enableAllMotor()
-        self.dxl.updateMotorData()
-        self.motor01.writePosition(1650)  # 2760-1795
-        self.motor02.writePosition(2150)  # 3800-2900
-        self.motor11.writePosition(2090)
-        self.motor12.writePosition(2048)
-        self.dxl.sentAllCmd()
+        # self.enableAllMotor()
+        # self.dxl.updateMotorData()
+        # self.motor01.writePosition(1650)  # 2760-1795
+        # self.motor02.writePosition(2150)  # 3800-2900
+        # self.motor11.writePosition(2090)
+        # self.motor12.writePosition(2048)
+        # self.dxl.sentAllCmd()
+
 
         self.enableAllMotor()
         self.dxl.updateMotorData()
@@ -229,11 +203,14 @@ class robotcontrol:
         self.dxl.sentAllCmd()
 
     def focMotorTest(self):
+        self.startfocmotor()
+        time.sleep(0.1)
         self.motortorquecommand(0x02, 80)
         self.motortorquecommand(0x01, -80)
 
     def motortorquecommand(self, id, torque):
         result = self.mc.torquecontrol(id, torque)
+
         return result
 
     def motorspeedcommand(self, id, speed):
@@ -248,8 +225,6 @@ class robotcontrol:
         self.mc.stopmotor(0x01)
         self.mc.stopmotor(0x02)
         self.dxl.disableAllMotor()
-
-    def plotResult(self):
         
         plt.figure(figsize=(10, 6))
 
@@ -296,7 +271,7 @@ class robotcontrol:
     def balanceControlLoop(self):
 
         dt = 1 / 200
-        middle_ang = 0.109    #original=>0.11
+        middle_ang = 0.087    #original=>0.11
         desire_pitch = 0     #0
         motor_speed = 0
         start_time = time.time()
@@ -326,11 +301,12 @@ class robotcontrol:
 
             torque_cmd_right = int(torque_cmd-steering_cmd)
             torque_cmd_left = int(torque_cmd+steering_cmd)
+
             rw_motor_st = self.mc.torquecontrol(0x01, torque_cmd_left) # right
             lw_motor_st = self.mc.torquecontrol(0x02, -torque_cmd_right)
 
             self.odomEstimate(rw_motor_st, lw_motor_st)
-            desire_pitch = self.velocity_pid.update(self.subscriber.linear_vel, self.linear_robot_vel, dt)
+            desire_pitch = self.velocity_pid.update(0.0, self.linear_robot_vel, dt)
             self.linear_vel_list.append(self.linear_robot_vel)
 
             desire_pitch += middle_ang
@@ -382,6 +358,9 @@ class robotcontrol:
             desire_pitch += middle_ang
             end = time.time()
             dt = start - end
+            # print('dt', dt)
+        # finally:
+        #     self.disableALLmotor()
 
     def startController(self):
         self.prev_pitch = 0
@@ -395,7 +374,7 @@ class robotcontrol:
     def startBalance(self):
         self.prev_pitch = 0
         self.isRunning = True
-        self.lockleg()
+        # self.lockleg()
         
         # self.startfocmotor()
         self.pid_thread = threading.Thread(target=self.balanceControlLoop)
@@ -406,11 +385,8 @@ class robotcontrol:
         self.mc.cleanerror(0x02)
 
 def main():
-    rclpy.init()
-    service = PoseService()
-
     robot_motor = robotcontrol(
-        'motor01', 'motor02', 'motor11', 'motor12', 'wheel1', 'wheel2', service)
+        'motor01', 'motor02', 'motor11', 'motor12', 'wheel1', 'wheel2')
     command_dict = {
         "d": robot_motor.disableALLmotor,
         "start": robot_motor.startController,
@@ -422,24 +398,19 @@ def main():
     }
     while True:
         try:
-            #cmd = input("CMD :")
-            cmd = ""  
-            time.sleep(0.1)
-            
-            if service.current_mode != service.previous_mode:
-                cmd = service.current_mode
-                #print("cmd",cmd)
-                service.previous_mode = service.current_mode
-                if cmd in command_dict:
-                    command_dict[cmd]()
-                elif cmd == "x":
-                    robot_motor.disableALLmotor()
-                    robot_motor.closeSystem()
-                    break
-            
+            cmd = input("CMD :")
+            if cmd in command_dict:
+                command_dict[cmd]()
+            elif cmd == "exit":
+                robot_motor.disableALLmotor()
+                robot_motor.closeSystem()
+                break
+
         except Exception as e:
             traceback.print_exc()
             break
 
+
 if __name__ == '__main__':
+
     main()
